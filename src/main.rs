@@ -1,8 +1,38 @@
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::io::{Error, ErrorKind};
-use warp::Filter;
+use warp::{Filter, Rejection, Reply};
+use warp::reject::Reject;
+use serde::{Deserialize, Serialize};
+use warp::cors::CorsForbidden;
+use warp::http::{Method, StatusCode};
 
-#[derive(Debug)]
+#[derive(Clone)]
+struct Store {
+    questions: HashMap<QuestionId, Question>,
+}
+
+impl Store {
+    fn new() -> Self {
+        Store {
+            questions: Self::init(),
+        }
+    }
+
+    fn init() -> HashMap<QuestionId, Question> {
+        let file = include_str!("../questions.json");
+        serde_json::from_str(file).expect("can't read questions.json")
+    }
+
+
+    fn add_question(mut self, question: Question) -> Self {
+        self.questions.insert(question.id.clone(), question);
+        self
+    }
+}
+
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct Question {
     id: QuestionId,
     title: String,
@@ -10,7 +40,7 @@ struct Question {
     tags: Option<Vec<String>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize, Clone, Eq, Hash, PartialEq)]
 struct QuestionId(String);
 
 impl Question {
@@ -35,12 +65,49 @@ impl FromStr for QuestionId {
     }
 }
 
+async fn get_questions(params: HashMap<String, String>, store: Store) -> Result<impl Reply, Rejection> {
+    if let Some(n) = params.get("start") {
+        println!("{}", n)
+    }
+    let res: Vec<Question> = store.questions.values().cloned().collect();
+
+    Ok(warp::reply::json(&res))
+}
+
+async fn return_error(r: Rejection) -> Result<impl Reply, Rejection> {
+    if let Some(error) = r.find::<CorsForbidden>() {
+        Ok(warp::reply::with_status(
+            error.to_string(),
+            StatusCode::FORBIDDEN,
+        ))
+    } else {
+        Ok(warp::reply::with_status(
+            "Route not found".to_string(),
+            StatusCode::NOT_FOUND,
+        ))
+    }
+}
+
 #[tokio::main]
 async fn main() {
-    let hello = warp::get()
-        .map(|| "Hello, World!".to_string());
+    let store = Store::new();
+    let store_filter = warp::any().map(move || store.clone());
 
-    warp::serve(hello)
+    let cors = warp::cors()
+        .allow_any_origin()
+        .allow_header("content-type")
+        .allow_methods(&[Method::PUT, Method::DELETE, Method::GET, Method::POST]);
+
+    let get_questions = warp::get()
+        .and(warp::path("questions"))
+        .and(warp::path::end())
+        .and(warp::query())
+        .and(store_filter)
+        .and_then(get_questions);
+
+    let routes = get_questions.with(cors);
+
+    warp::serve(routes)
         .run(([127, 0, 0, 1], 3030))
         .await;
 }
